@@ -14,6 +14,7 @@ yarn-error.log*
 terraform.tfvars
 terraform.tfvars.json
 crash.log
+terraform.tfvars
 
 # ─── Logs and Runtime Files ─────────────
 *.log

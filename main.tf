@@ -1,14 +1,50 @@
+terraform {
+  required_version = ">= 1.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 4.0"
+    }
+    random = {
+      source = "hashicorp/random"
+      version = "~> 3.0"
+    }
+  }
+}
+
 provider "aws" {
-  region = var.region
+  region = "us-east-1"  # change to your region
+}
+
+# IAM Role for CodePipeline
+resource "aws_iam_role" "codepipeline_role" {
+  name = "codepipeline-service-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = {
+        Service = "codepipeline.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "codepipeline_attach" {
+  role       = aws_iam_role.codepipeline_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSCodePipeline_FullAccess"
 }
 
 # IAM Role for CodeBuild
 resource "aws_iam_role" "codebuild_role" {
   name = "codebuild-service-role"
+
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect = "Allow"
+      Effect    = "Allow"
       Principal = {
         Service = "codebuild.amazonaws.com"
       }
@@ -22,21 +58,29 @@ resource "aws_iam_role_policy_attachment" "codebuild_attach" {
   policy_arn = "arn:aws:iam::aws:policy/AWSCodeBuildDeveloperAccess"
 }
 
-# S3 bucket for CodePipeline artifacts
-resource "aws_s3_bucket" "pipeline_artifacts" {
-  bucket = "charles-cicd-artifacts-${random_id.bucket_id.hex}"
-  force_destroy = true
+resource "aws_iam_role_policy_attachment" "codebuild_s3_attach" {
+  role       = aws_iam_role.codebuild_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
 }
 
-resource "random_id" "bucket_id" {
+# Random ID for bucket suffix
+resource "random_id" "bucket_suffix" {
   byte_length = 4
 }
 
-# CodeBuild Project
-resource "aws_codebuild_project" "build_project" {
-  name          = "charles-ci-build"
-  description   = "Build project for CI/CD"
-  build_timeout = 5
+# S3 bucket for pipeline artifacts
+resource "aws_s3_bucket" "codepipeline_bucket" {
+  bucket = "my-ci-cd-pipeline-artifacts-${random_id.bucket_suffix.hex}"
+  acl    = "private"
+
+  versioning {
+    enabled = true
+  }
+}
+
+# CodeBuild project
+resource "aws_codebuild_project" "build" {
+  name          = "nodejs-build-project"
   service_role  = aws_iam_role.codebuild_role.arn
 
   artifacts {
@@ -45,48 +89,33 @@ resource "aws_codebuild_project" "build_project" {
 
   environment {
     compute_type                = "BUILD_GENERAL1_SMALL"
-    image                       = "aws/codebuild/standard:5.0"
+    image                       = "aws/codebuild/standard:6.0"
     type                        = "LINUX_CONTAINER"
-    privileged_mode             = true
+    environment_variable {
+      name  = "ENV"
+      value = "production"
+    }
   }
 
   source {
-    type            = "CODEPIPELINE"
-    buildspec       = "buildspec.yml"
+    type      = "CODEPIPELINE"
+    buildspec = file("buildspec.yml")
   }
 }
 
-# CodePipeline IAM Role
-resource "aws_iam_role" "codepipeline_role" {
-  name = "codepipeline-service-role"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Principal = {
-        Service = "codepipeline.amazonaws.com"
-      }
-      Action = "sts:AssumeRole"
-    }]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "codepipeline_attach" {
-  role       = aws_iam_role.codepipeline_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AWSCodePipelineFullAccess"
-}
-
 # CodePipeline
-resource "aws_codepipeline" "charles_pipeline" {
-  name     = "charles-ci-cd-pipeline"
+resource "aws_codepipeline" "pipeline" {
+  name     = "nodejs-codepipeline"
   role_arn = aws_iam_role.codepipeline_role.arn
+
   artifact_store {
-    location = aws_s3_bucket.pipeline_artifacts.bucket
+    location = aws_s3_bucket.codepipeline_bucket.bucket
     type     = "S3"
   }
 
   stage {
     name = "Source"
+
     action {
       name             = "Source"
       category         = "Source"
@@ -96,16 +125,18 @@ resource "aws_codepipeline" "charles_pipeline" {
       output_artifacts = ["source_output"]
 
       configuration = {
-        Owner      = split("/", var.github_repo)[0]
-        Repo       = split("/", var.github_repo)[1]
-        Branch     = var.github_branch
-        OAuthToken = var.github_token
+        Owner                = var.github_owner
+        Repo                 = var.github_repo
+        Branch               = var.github_branch
+        OAuthToken           = var.github_token
+        PollForSourceChanges = "false"
       }
     }
   }
 
   stage {
     name = "Build"
+
     action {
       name             = "Build"
       category         = "Build"
@@ -116,10 +147,8 @@ resource "aws_codepipeline" "charles_pipeline" {
       version          = "1"
 
       configuration = {
-        ProjectName = aws_codebuild_project.build_project.name
+        ProjectName = aws_codebuild_project.build.name
       }
     }
   }
-
-  # Add a Deploy stage here if needed
 }
